@@ -1,127 +1,151 @@
 # assignment-7-Ai
 Ethics
-Q1: Define algorithmic bias and provide two examples of how it manifests in AI systems.
-Definition: Algorithmic bias occurs when an AI system produces systematically unfair outcomes that disadvantage certain individuals or groups. This can arise from biased training data, model design choices, skewed sampling, or deployment context.
-Examples:
-Hiring systems trained on historical hiring data that favored men can learn to penalize resumes with indicators of female gender (e.g., women’s colleges, maternity gaps).
 
-Facial recognition models trained on datasets dominated by lighter-skinned faces tend to have much higher error rates on darker-skinned individuals, causing misidentification.
+# compas_audit.py
+# Audit COMPAS recidivism dataset using IBM AIF360
+# Requirements: aif360, pandas, numpy, scikit-learn, matplotlib
 
-Q2: Explain the difference between transparency and explainability in AI. Why are both important?
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-Transparency refers to the openness about an AI system’s components: data sources, model type, training process, performance metrics, and governance. A transparent system reveals what went into building it.
+from aif360.datasets import CompasDataset
+from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric
+from aif360.algorithms.preprocessing import Reweighing
+from aif360.algorithms.postprocessing import RejectOptionClassification
+from aif360.algorithms.inprocessing import AdversarialDebiasing
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
 
-Explainability (or interpretability) refers to how well a model’s decisions can be understood and justified — e.g., providing reasons or feature importance for a specific prediction.
-Why both matter: Transparency lets stakeholders audit and hold developers accountable; explainability helps affected individuals, regulators, and operators understand and contest decisions. Together they enable trust, debugging, and compliance with legal/ethical standards.
+import warnings
+warnings.filterwarnings("ignore")
 
-Q3: How does GDPR impact AI development in the EU?
-Key GDPR implications for AI:
+# 1. Load COMPAS dataset from aif360
+dataset = CompasDataset()  # defaults to ProPublica COMPAS processed dataset
 
-Lawful basis & purpose limitation: You must have a lawful basis (consent, contract, legitimate interest, etc.) for processing personal data, and use data only for specified purposes.
+# Inspect
+print(dataset.features.shape)
+print("Protected attribute names:", dataset.protected_attribute_names)
+print("Label name:", dataset.label_names)
 
-Data minimization & storage limitation: Collect and keep only data necessary for the purpose.
+# Protected attribute: 'race' with privileged group 'Caucasian'
+privileged_groups = [{'race': 1}]  # aif360 encodes privileged as 1 (Caucasian)
+unprivileged_groups = [{'race': 0}]  # non-Caucasian
 
-Rights of data subjects: Right of access, rectification, erasure (“right to be forgotten”), and data portability — all can affect models and pipelines.
+# 2. Train-test split
+train, test = dataset.split([0.7], shuffle=True)
 
-Automated decision-making: Article 22 restricts solely automated decisions that produce legal or similarly significant effects; individuals may have a right to meaningful information about the logic and to contest decisions.
+# 3. Baseline metrics
+print("=== Baseline dataset metrics (train) ===")
+metric_train = BinaryLabelDatasetMetric(train, unprivileged_groups=unprivileged_groups,
+                                       privileged_groups=privileged_groups)
+print("Mean label (positive rate):", metric_train.base_rate())
+print("Disparate impact (p(unpriv)/p(priv)):", metric_train.disparate_impact())
+print("Statistical parity difference:", metric_train.statistical_parity_difference())
 
-Accountability & DPIA: Data Protection Impact Assessments (DPIAs) are required for high-risk processing (often applies to large-scale profiling or biometric systems). Controllers must demonstrate compliance and maintain records.
+# Train a simple classifier (Logistic Regression) on original features
+X_train = train.features
+y_train = train.labels.ravel()
+X_test = test.features
+y_test = test.labels.ravel()
 
-Privacy by design/default: Integrate privacy protections into systems from the start (e.g., pseudonymization, access controls).
+scaler = StandardScaler()
+clf = LogisticRegression(max_iter=1000)
 
-(These are practical effects: modelers must plan for consent, logging, DPIAs, mechanisms to explain/contest decisions, and careful data governance.)
+# Fit on numeric features only (aif360 dataset prepared)
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-2. Ethical Principles Matching
-Match definitions to letters:
+clf.fit(X_train_scaled, y_train)
 
-Ensuring AI does not harm individuals or society. — B) Non-maleficence
+# Create predicted dataset for test
+y_pred = clf.predict(X_test_scaled)
+test_pred = test.copy()
+test_pred.labels = y_pred.reshape(-1,1)
 
-Respecting users’ right to control their data and decisions. — C) Autonomy
+# Compute classification metrics disaggregated by race
+class_metric = ClassificationMetric(test, test_pred,
+                                    unprivileged_groups=unprivileged_groups,
+                                    privileged_groups=privileged_groups)
 
-Designing AI to be environmentally friendly. — D) Sustainability
+print("\n=== Classification metrics on test ===")
+print("Accuracy:", class_metric.accuracy())
+print("False positive rate (unprivileged):", class_metric.false_positive_rate(unprivileged=True))
+print("False positive rate (privileged):", class_metric.false_positive_rate(privileged=True))
+print("False negative rate (unprivileged):", class_metric.false_negative_rate(unprivileged=True))
+print("False negative rate (privileged):", class_metric.false_negative_rate(privileged=True))
+print("Disparate impact (predicted):", class_metric.disparate_impact())
 
-Fair distribution of AI benefits and risks. — A) Justice
+# 4. Visualize disparity in FPR between groups
+fpr_unpriv = class_metric.false_positive_rate(unprivileged=True)
+fpr_priv = class_metric.false_positive_rate(privileged=True)
 
-Part 2 — Case Study Analysis (40%)
-Case 1: Biased Hiring Tool (Amazon scenario)
-Scenario recap: Amazon’s AI recruiting tool penalized female candidates.
+groups = ['Unprivileged (non-Caucasian)', 'Privileged (Caucasian)']
+fpr_vals = [fpr_unpriv, fpr_priv]
 
-(a) Identify sources of bias
-Training data bias: Historical hiring decisions reflected male-dominated hires, so the model learned to rank male-like features higher.
+plt.figure(figsize=(6,4))
+plt.bar(groups, fpr_vals)
+plt.title('False Positive Rate by Race Group')
+plt.ylabel('False Positive Rate')
+plt.ylim(0, max(fpr_vals)*1.2)
+for i,v in enumerate(fpr_vals):
+    plt.text(i, v + 0.01, f"{v:.3f}", ha='center')
+plt.tight_layout()
+plt.show()
 
-Label bias / proxy features: Labels (e.g., past-hire = good candidate) reflect prior human bias. The model may use proxies (e.g., words like “women’s college” or career gaps) that correlate with gender.
+# 5. Apply a preprocessing mitigation: Reweighing
+rw = Reweighing(unprivileged_groups=unprivileged_groups, privileged_groups=privileged_groups)
+train_rw = rw.fit_transform(train)
 
-Sampling bias: Under-representation of female applicants in training data; imbalance leads to poor generalization.
+# Train classifier on reweighted data (weights in instance attribute)
+clf2 = LogisticRegression(max_iter=1000)
+clf2.fit(scaler.fit_transform(train_rw.features), train_rw.labels.ravel(), sample_weight=train_rw.instance_weights.ravel())
 
-Objective / loss function mis-specification: Optimizing only for historical hiring outcomes without fairness constraints enshrines bias.
+# Predict on test
+y_pred2 = clf2.predict(scaler.transform(test.features))
+test_pred2 = test.copy()
+test_pred2.labels = y_pred2.reshape(-1,1)
 
-Feature engineering choices: Including features that leak gender or socio-cultural proxies without mitigation.
+class_metric2 = ClassificationMetric(test, test_pred2,
+                                     unprivileged_groups=unprivileged_groups,
+                                     privileged_groups=privileged_groups)
 
-(b) Three fixes to make the tool fairer
-Data-level corrections:
+print("\n=== After Reweighing (train) & Classifier ===")
+print("Accuracy:", class_metric2.accuracy())
+print("FPR (unprivileged):", class_metric2.false_positive_rate(unprivileged=True))
+print("FPR (privileged):", class_metric2.false_positive_rate(privileged=True))
+print("Statistical parity difference (predicted):", class_metric2.statistical_parity_difference())
+print("Disparate impact (predicted):", class_metric2.disparate_impact())
 
-Gather a balanced dataset (oversample female applicant cases where feasible) or use reweighting techniques to correct historical imbalance.
+# 6. Post-processing: Reject Option Classification (example)
+roc = RejectOptionClassification(unprivileged_groups=unprivileged_groups,
+                                 privileged_groups=privileged_groups,
+                                 low_class_thresh=0.01, high_class_thresh=0.99,
+                                 num_class_thresh=50, num_ROC_margin=50)
 
-Remove or mask direct gender indicators and known proxies; but be careful—blindness alone isn’t sufficient if proxies persist.
+# Need probabilistic scores to apply ROC; use predict_proba
+scores = clf.predict_proba(scaler.transform(test.features))[:,1]
+test_score = test.copy()
+test_score.scores = scores.reshape(-1,1)
 
-Algorithmic fairness interventions:
+# fit ROC on validation data if required — here we use test as demonstration (in real audit use separate val set)
+try:
+    roc = roc.fit(test, test_score)
+    test_pred_roc = roc.predict(test_score)
+    class_metric_roc = ClassificationMetric(test, test_pred_roc,
+                                            unprivileged_groups=unprivileged_groups,
+                                            privileged_groups=privileged_groups)
+    print("\n=== After Reject Option Classification ===")
+    print("FPR (unprivileged):", class_metric_roc.false_positive_rate(unprivileged=True))
+    print("FPR (privileged):", class_metric_roc.false_positive_rate(privileged=True))
+    print("Disparate impact (predicted):", class_metric_roc.disparate_impact())
+except Exception as e:
+    print("RejectOptionClassification step could not be completed in this run:", e)
 
-Apply fairness-aware learning (e.g., adversarial debiasing, equalized odds constraints, or optimized post-processing) to enforce parity across protected groups.
-
-Use techniques like reweighing, disparate impact remover, or constrained optimization that trade off minimal accuracy loss for fairness gains.
-
-Human-in-the-loop & process changes:
-
-Make the tool assistive (ranking suggestions) rather than automatic. Require diverse human panels for final decisions and regularly audit model outputs.
-
-Add an explainability module so hiring staff can see why candidates were ranked as they are.
-
-Enact governance: logging, feedback loops to capture mistakes, and a process to update model with corrected labels.
-
-(c) Metrics to evaluate fairness post-correction
-Demographic parity / Statistical parity difference (difference in positive selection rates between groups).
-
-Equalized odds (compare true positive rates and false positive rates across groups).
-
-Predictive parity / calibration (are predicted scores calibrated across groups?).
-
-False negative rate parity (important for hiring: missing qualified members).
-
-Disparate impact ratio (selection rate for protected group divided by unprotected group; e.g., 80% rule).
-
-Subgroup performance metrics: precision, recall, AUC per group.
-
-Business + fairness dashboard: track hiring conversion rates by group, time-to-hire, and downstream performance (if ethically and legally permissible).
-
-Case 2: Facial Recognition in Policing
-Scenario recap: Misidentification rates are higher for minorities.
-
-(a) Ethical risks
-Wrongful arrests / injustice: Higher false positives for minorities can lead to wrongful stops, arrests, and serious legal harms.
-
-Discrimination & civil liberties: Systemic targeting increases profiling and exacerbates distrust between communities and law enforcement.
-
-Privacy violations: Mass surveillance and face-matching without consent invasive of personal privacy.
-
-Chilling effects: Public may avoid lawful activities due to fear of surveillance.
-
-Due process & transparency: Lack of explainability and opaque use undermines rights to contest evidence.
-
-Mission creep: Systems deployed for narrow use expand to more intrusive applications without oversight.
-
-(b) Recommended policies for responsible deployment
-Use restrictions & risk classification: Ban or restrict face recognition for high-risk uses (e.g., identifying suspects in crowds) unless strict standards met. Allow limited, well-justified uses subject to oversight.
-
-Regulatory oversight & DPIAs: Require independent Data Protection Impact Assessments and external audits before deployment.
-
-Human oversight & corroboration: Never allow automated identification to be sole basis for enforcement action — require corroborating evidence and human verification.
-
-Transparency & documentation: Publicly disclose use cases, data retention policies, performance metrics disaggregated by demographic groups, and mechanisms to challenge matches.
-
-Performance & fairness thresholds: Enforce minimum accuracy and disparity thresholds across demographic groups; if not met, prohibit deployment.
-
-Consent & notice (where feasible): Give notice where surveillance is in public/private spaces and clearly define retention and deletion policies.
-
-Logging & accountability: Maintain immutable logs for matches and actions taken, with accessible redress mechanisms and independent audits.
-
-Community & legal oversight: Engage affected communities and legislate clear boundaries (e.g., parliamentary or municipal approval, judicial warrants for sensitive uses).
+# 7. Summary printout of key metrics
+print("\n=== Summary ===")
+print("Baseline disparate impact (train):", metric_train.disparate_impact())
+print("Predicted disparate impact (baseline classifier):", class_metric.disparate_impact())
+print("Predicted disparate impact (reweighing):", class_metric2.disparate_impact())
